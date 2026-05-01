@@ -1,0 +1,249 @@
+// Strength Training Exercise Repetition Tracker - MATLAB Logging Version
+// Irfan Hazlan
+// Student ID: 11345787
+
+#include <Adafruit_MPU6050.h>  // MPU6050 Inertial Measurement Unit (IMU) library
+#include <Adafruit_Sensor.h>   // Adafruit Unified Sensor library
+#include <Wire.h>              // I2C communication library, communication between IMU and OLED Display with ESP32
+#include <math.h>              // Maths function library
+#include <Adafruit_GFX.h>      // OLED Graphics library
+#include <Adafruit_SSD1306.h>  // OLED Display Driver
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 32
+#define OLED_RESET -1
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_MPU6050 imu;
+
+// Create signal variables which will be used for signal processing
+float ax, ay, az;           // Acceleration values along X, Y and Z axes
+float a_mag = 0.0f;         // Magnitude of acceleration vector
+float a_gravity = 9.81f;    // Estimate of initial gravity component
+float a_dyn = 0.0f;         // Dynamic acceleration after gravity removal
+float a_smooth = 0.0f;      // Smoothed dynamic acceleration for repetition detection
+
+const float ALPHA = 0.03f;  // Low pass filter coefficient for gravitational component estimates
+const float BETA = 0.1f;    // Coefficient for smoothing filter
+
+// Repetition counters
+unsigned long reps = 0;     // Current active repetition count
+
+// Repetition state machine
+enum Repetition_State { wait_zero, positive_motion, negative_motion };  // 3 states for detecting one complete repetition cycle
+Repetition_State state = wait_zero;                                     // Initial state
+
+const float ZERO_BAND = 0.4f;                                   // Detecting neutral level of the exercise motion
+const float POSITIVE_THRESHOLD = 1.0f;                           // Threshold value for positive movement
+const float NEGATIVE_THRESHOLD = -1.0f;                          // Threshold value for negative movement
+const unsigned long min_time_between_reps = 600;                 // Minimum time between two valid repetitions, to avoid false counting from fast vibrations
+unsigned long last_rep_time = 0;                                 // Time of the last valid counted repetition
+
+// Setup validation
+bool enable_counting = false;                                    // Flag that allows user to set up the starting position before repetition counting begins
+const float STABLE_BAND = 0.06f;                                 // Near-zero acceleration value that indicates the device is stable
+const unsigned long exercise_setup = 900;                        // Time the device needs to be stable before repetition counting starts
+unsigned long initial_stable = 0;                                // Store the initial time at which the device becomes stable
+
+// Idle detection for automatic rest timer
+const unsigned long IDLE_TIME = 3000;                            // Idle time in ms before an automatic rest timer is generated
+const int REST_TIME = 10;                                        // Set rest time duration to 10 seconds
+
+bool rest_active = false;                                        // Flag for rest timer
+unsigned long initial_idle = 0;                                  // Store the initial time at which the device is idle
+unsigned long initial_rest = 0;                                  // Store the time at which the rest timer started
+int rest_seconds_left = 0;                                       // Duration of rest timer for OLED Display and MATLAB/Excel logging
+
+// Device's OLED Display function
+void Update_Display() {
+  display.clearDisplay();                 // Reset display
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 0);                // Status text colour, size and position on the OLED Display
+
+  if (rest_active) {
+    display.print("REST ");
+    display.print(rest_seconds_left);
+    display.print(" s");
+  } else if (!enable_counting) {
+    display.print("SETUP");
+  } else {
+    display.print("READY");              // Display exercise status
+  }
+
+  display.setTextSize(2);
+  display.setCursor(0, 14);               // Set repetition counter text size and position
+  display.print("Reps:");
+  display.print(reps);                    // Display number of reps
+
+  display.display();
+}
+
+void Reset_Variables() {                  // Function to reset all variables used in the software algorithm, such as repetition counter, rest timer, exercise setup and idle detection
+  reps = 0;
+
+  a_gravity = 9.81f;
+  a_dyn = 0.0f;
+  a_smooth = 0.0f;
+
+  state = wait_zero;
+  last_rep_time = 0;
+
+  enable_counting = false;
+  initial_stable = 0;
+
+  rest_active = false;
+  initial_idle = 0;
+  initial_rest = 0;
+  rest_seconds_left = 0;
+
+  Update_Display();
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  Wire.begin(23, 22);                    // I2C GPIO Pins on the ESP32 for communication with MPU6050 IMU and OLED Display, 23 = SDA and 22 = SCL
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    while (1) {
+      delay(10);
+    }
+  }
+
+  if (!imu.begin()) {
+    Serial.println("MPU6050 error");
+    while (1) {
+      delay(10);
+    }
+  }
+
+  imu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+  Reset_Variables();
+
+  // Header for MATLAB / Excel
+  Serial.println("time_ms,a_mag,a_gravity,a_dyn,a_smooth,reps,counting_enabled,rest_active,state,rest_seconds_left");
+}
+
+void loop() {
+  sensors_event_t a, g, t;
+  imu.getEvent(&a, &g, &t);                     // Read accelerometer and gyroscope data from MPU6050
+
+  ax = a.acceleration.x;
+  ay = a.acceleration.y;
+  az = a.acceleration.z;                        // Raw accelerometer reading for X, Y and Z axes
+
+  a_mag = sqrtf(ax * ax + ay * ay + az * az);   // Compute the acceleration magnitude
+  a_gravity += ALPHA * (a_mag - a_gravity);     // Estimate the gravity component using low-pass filtering
+  a_dyn = a_mag - a_gravity;                    // Remove gravity component to obtain dynamic acceleration
+  a_smooth += BETA * (a_dyn - a_smooth);        // Further smoothing for a cleaner dynamic acceleration value
+
+  unsigned long now = millis();                 // Obtain and store current time in 'now'
+
+  // Setup validation
+  if (!enable_counting) {                       // Allow user to set up initial device position before repetition counting starts
+    if (fabs(a_smooth) < STABLE_BAND) {         // Check if the smoothed acceleration is within the stable band
+      if (initial_stable == 0) {
+        initial_stable = now;
+      } else if (now - initial_stable >= exercise_setup) {   // Enable repetition counting after the device remains stable for the required setup time
+        enable_counting = true;
+        state = wait_zero;
+        last_rep_time = now;
+      }
+    } else {
+      initial_stable = 0;                       // Reset the initial stable time if the device is no longer stable
+    }
+  }
+
+  // Rest Timer will start automatically if the device remains idle for some time
+  bool is_idle_now = (fabs(a_smooth) < ZERO_BAND);
+
+  if (enable_counting && !rest_active) {
+    if (!is_idle_now) {
+      initial_idle = 0;
+    } else {
+      if (initial_idle == 0) {
+        initial_idle = now;
+      } else if (now - initial_idle >= IDLE_TIME) {
+        reps = 0;                               // Reset number of reps
+        rest_active = true;                     // Start rest timer
+        initial_rest = now;
+        rest_seconds_left = REST_TIME;
+        state = wait_zero;
+        last_rep_time = now;
+      }
+    }
+  }
+
+  // Rest timer logic
+  if (rest_active) {
+    unsigned long elapsed = now - initial_rest;
+    int left = REST_TIME - (int)(elapsed / 1000UL);   // Ensure rest timer is integer
+
+    if (left < 0) {
+      left = 0;
+    }                                                 // Ensure rest timer remains at 0 and avoid displaying negative numbers
+
+    rest_seconds_left = left;
+
+    if (rest_seconds_left == 0) {
+      rest_active = false;
+      initial_idle = 0;
+      enable_counting = false;
+      initial_stable = 0;
+      state = wait_zero;
+      last_rep_time = now;
+    }
+  }
+
+  // Finite State Machine for repetition tracking algorithm
+  if (enable_counting && !rest_active) {
+    unsigned long since_last = now - last_rep_time;
+
+    if (state == wait_zero) {
+      if (fabs(a_smooth) < ZERO_BAND) {                    // Check if the smoothed acceleration is within zero/neutral band
+        state = positive_motion;                           // Move to next state
+      }
+    } else if (state == positive_motion) {
+      if (a_smooth > POSITIVE_THRESHOLD) {                 // Check if the smoothed acceleration exceeds positive motion threshold = concentric motion of an exercise
+        state = negative_motion;                           // Move to next state
+      }
+    } else if (state == negative_motion) {
+      if (a_smooth < NEGATIVE_THRESHOLD) {                 // Check if the smoothed acceleration is lower than the negative motion threshold = eccentric motion of an exercise
+        if (since_last >= min_time_between_reps) {         // Ensure the reps are performed for more than minimum duration between reps, avoid false counting
+          reps++;                                          // Increase the number of reps as one complete exercise motion is now completed
+          last_rep_time = now;
+        }
+
+        state = wait_zero;                                 // Move to initial state
+      }
+    }
+  }
+
+  Update_Display();
+
+  // Print data for MATLAB or Excel logging
+  Serial.print(now);
+  Serial.print(",");
+  Serial.print(a_mag);
+  Serial.print(",");
+  Serial.print(a_gravity);
+  Serial.print(",");
+  Serial.print(a_dyn);
+  Serial.print(",");
+  Serial.print(a_smooth);
+  Serial.print(",");
+  Serial.print(reps);
+  Serial.print(",");
+  Serial.print(enable_counting ? 1 : 0);
+  Serial.print(",");
+  Serial.print(rest_active ? 1 : 0);
+  Serial.print(",");
+  Serial.print((int)state);
+  Serial.print(",");
+  Serial.println(rest_seconds_left);
+
+  delay(20);                                             // Approximately 50 Hz sampling rate
+}
