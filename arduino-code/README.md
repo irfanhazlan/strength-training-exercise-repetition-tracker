@@ -8,8 +8,8 @@ The Arduino code runs on the ESP32-based wearable device and processes accelerat
 
 | File | Description |
 |---|---|
-| `strength_training_repetition_tracker.ino` | Main Arduino code used for the final wearable device. It includes IMU signal processing, OLED display output, Wi-Fi web server communication, repetition counting, set tracking, and rest timer logic |
-| `matlab_logging_version.ino` | Arduino logging version used to print IMU and algorithm variables to the Serial Monitor in CSV format for MATLAB and Excel analysis |
+| `device_software_code` | Main Arduino code used for the final wearable device. It includes IMU signal processing, OLED display output, Wi-Fi web server communication, repetition counting, set tracking, and rest timer logic |
+| `print_imu_waveform` | Arduino logging version used to print IMU and algorithm variables to the Serial Monitor in CSV format for MATLAB and Excel analysis |
 
 ## Required Hardware
 
@@ -18,7 +18,6 @@ The Arduino code runs on the ESP32-based wearable device and processes accelerat
 - OLED display
 - Lithium-polymer battery
 - Connecting wires
-- Wearable enclosure
 
 ## Required Arduino Libraries
 
@@ -35,7 +34,7 @@ Install the following libraries in the Arduino IDE before running the code:
 ## How to Run the Main Code
 
 1. Open the Arduino IDE.
-2. Open `strength_training_repetition_tracker.ino`.
+2. Open `device_software_code`.
 3. Install the required libraries listed above.
 4. Connect the ESP32 board to the computer.
 5. Select the correct ESP32 board and COM port.
@@ -46,7 +45,7 @@ Install the following libraries in the Arduino IDE before running the code:
 
 ## How to Run the MATLAB Logging Version
 
-1. Open `matlab_logging_version.ino` in the Arduino IDE.
+1. Open `print_imu_waveform` in the Arduino IDE.
 2. Upload the code to the ESP32.
 3. Open the Serial Monitor at `115200` baud.
 4. Perform the exercise while the device records IMU data.
